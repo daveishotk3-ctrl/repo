@@ -89,8 +89,9 @@
       border-radius: 4px;
       font-size: 13px;
     }
-    .message-sender { margin: 0 0 4px 0; font-weight: 500; color: #0066cc; }
+    .message-sender { margin: 0 0 2px 0; font-weight: 500; color: #0066cc; font-size: 12px; }
     .message-text { margin: 0; color: #333; }
+    .message-time { margin: 2px 0 0 0; font-size: 11px; color: #999; }
     #inputArea {
       padding: 12px 16px;
       border-top: 1px solid #e0e0e0;
@@ -110,6 +111,7 @@
       font-size: 13px;
     }
     #sendBtn:hover { background: #0052a3; }
+    #sendBtn:disabled { background: #ccc; cursor: not-allowed; }
     #modalOverlay {
       display: none;
       position: fixed;
@@ -151,6 +153,7 @@
     .modal-secondary:hover { background: #f9f9f9; }
     .modal-buttons { display: flex; gap: 8px; }
     .modal-buttons button { flex: 1; }
+    .setup-info { background: #fffacd; border: 1px solid #ddd; padding: 12px; border-radius: 4px; margin-bottom: 16px; font-size: 12px; line-height: 1.5; }
   </style>
 </head>
 <body>
@@ -181,12 +184,77 @@
     </div>
   </div>
 
+  <script src="https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js"></script>
+
   <script>
     const store = {
       user: JSON.parse(localStorage.getItem('chatUser')) || { name: null, nickname: null },
       chats: JSON.parse(localStorage.getItem('chatChats')) || {},
-      currentChat: localStorage.getItem('currentChat') || null
+      currentChat: localStorage.getItem('currentChat') || null,
+      fbConfig: JSON.parse(localStorage.getItem('fbConfig')) || null,
+      listeners: {}
     };
+
+    let db = null;
+
+    function initFirebase() {
+      if (!store.fbConfig || !store.fbConfig.apiKey) {
+        showSetupFirebaseModal();
+        return false;
+      }
+
+      try {
+        const app = firebase.initializeApp(store.fbConfig);
+        db = firebase.database(app);
+        return true;
+      } catch (e) {
+        console.error('Firebase init error:', e);
+        return false;
+      }
+    }
+
+    function showSetupFirebaseModal() {
+      const modal = `
+        <h2>Setup Firebase</h2>
+        <p style="font-size: 13px; margin-bottom: 12px;">To enable live chat with friends, you need a Firebase Realtime Database.</p>
+        <ol style="font-size: 12px; margin-bottom: 16px; padding-left: 20px;">
+          <li>Go to <a href="https://firebase.google.com" target="_blank">firebase.google.com</a></li>
+          <li>Create a new project</li>
+          <li>Go to Realtime Database and create a database (start in test mode)</li>
+          <li>Get your Web API credentials from Project Settings</li>
+          <li>Paste them below</li>
+        </ol>
+        <label>API Key</label>
+        <input id="apiKeyInput" type="text" placeholder="Your API Key" />
+        <label>Project ID</label>
+        <input id="projectIdInput" type="text" placeholder="Your Project ID" />
+        <label>Database URL</label>
+        <input id="dbUrlInput" type="text" placeholder="https://your-project.firebaseio.com" />
+        <div class="modal-buttons">
+          <button id="setupFbBtn" class="modal-primary">Save</button>
+          <button onclick="closeModal()" class="modal-secondary">Skip for now</button>
+        </div>
+      `;
+      showModal(modal);
+      document.getElementById('setupFbBtn').addEventListener('click', () => {
+        const apiKey = document.getElementById('apiKeyInput').value.trim();
+        const projectId = document.getElementById('projectIdInput').value.trim();
+        const dbUrl = document.getElementById('dbUrlInput').value.trim();
+
+        if (!apiKey || !projectId || !dbUrl) {
+          alert('Please fill in all fields');
+          return;
+        }
+
+        store.fbConfig = { apiKey, projectId, databaseURL: dbUrl };
+        localStorage.setItem('fbConfig', JSON.stringify(store.fbConfig));
+        closeModal();
+        if (initFirebase()) {
+          renderChatList();
+        }
+      });
+    }
 
     function saveStore() {
       localStorage.setItem('chatUser', JSON.stringify(store.user));
@@ -275,7 +343,7 @@
           return;
         }
         const id = 'chat_' + Date.now();
-        store.chats[id] = { id, name, isPrivate, password, unlocked: !isPrivate, messages: [] };
+        store.chats[id] = { id, name, isPrivate, password, unlocked: !isPrivate };
         saveStore();
         closeModal();
         renderChatList();
@@ -352,13 +420,29 @@
 
       const container = document.getElementById('messagesContainer');
       container.innerHTML = '';
-      chat.messages.forEach(msg => {
+
+      if (!db) {
+        container.innerHTML = '<p style="color: #999; font-size: 13px;">Firebase not connected. Messages will be local only. Go to Settings to setup Firebase for live chat.</p>';
+        return;
+      }
+
+      const chatRef = db.ref('chats/' + chat.id + '/messages');
+
+      if (store.listeners[chat.id]) {
+        chatRef.off('child_added', store.listeners[chat.id]);
+      }
+
+      chatRef.orderByChild('timestamp').on('child_added', (snapshot) => {
+        const msg = snapshot.val();
         const div = document.createElement('div');
         div.className = 'message';
-        div.innerHTML = `<p class="message-sender">${msg.sender}</p><p class="message-text">${msg.text}</p>`;
+        const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        div.innerHTML = `<p class="message-sender">${msg.sender}</p><p class="message-text">${msg.text}</p><p class="message-time">${time}</p>`;
         container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
       });
-      container.scrollTop = container.scrollHeight;
+
+      store.listeners[chat.id] = null;
     }
 
     function sendMessage() {
@@ -366,11 +450,27 @@
       const text = document.getElementById('msgInput').value.trim();
       if (!text || !chat) return;
 
+      document.getElementById('sendBtn').disabled = true;
+
       const sender = store.user.nickname || store.user.name;
-      chat.messages.push({ sender, text, time: new Date().toISOString() });
-      saveStore();
-      document.getElementById('msgInput').value = '';
-      renderChat();
+
+      if (db) {
+        const chatRef = db.ref('chats/' + chat.id + '/messages');
+        chatRef.push({
+          sender,
+          text,
+          timestamp: new Date().getTime()
+        }).then(() => {
+          document.getElementById('msgInput').value = '';
+          document.getElementById('sendBtn').disabled = false;
+        }).catch((err) => {
+          alert('Error sending message: ' + err.message);
+          document.getElementById('sendBtn').disabled = false;
+        });
+      } else {
+        document.getElementById('msgInput').value = '';
+        document.getElementById('sendBtn').disabled = false;
+      }
     }
 
     document.getElementById('newChatBtn').addEventListener('click', showNewChatModal);
@@ -380,6 +480,7 @@
       if (e.key === 'Enter') sendMessage();
     });
 
+    initFirebase();
     renderChatList();
     if (store.currentChat) renderChat();
   </script>
