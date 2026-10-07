@@ -198,7 +198,21 @@
 
     let db = null;
 
-    function initFirebase() {
+    async function initFirebase() {
+      // Try to load config from server first
+      if (!store.fbConfig || !store.fbConfig.apiKey) {
+        try {
+          const res = await fetch('/api/config');
+          const data = await res.json();
+          if (data.firebase && data.firebase.apiKey) {
+            store.fbConfig = data.firebase;
+            localStorage.setItem('fbConfig', JSON.stringify(store.fbConfig));
+          }
+        } catch (e) {
+          console.warn('Could not fetch Firebase config from server:', e);
+        }
+      }
+
       if (!store.fbConfig || !store.fbConfig.apiKey) {
         showSetupFirebaseModal();
         return false;
